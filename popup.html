@@ -1,0 +1,628 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Peloton Output Tracker</title>
+    <style>
+        body {
+            padding: 16px;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        }
+        .drop-zone {
+            border: 2px dashed #ccc;
+            border-radius: 8px;
+            padding: 20px;
+            text-align: center;
+            margin-bottom: 20px;
+            transition: border-color 0.3s ease;
+        }
+        .drop-zone.drag-over {
+            border-color: #2667FF;
+            background: #f0f5ff;
+        }
+        .controls {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 16px;
+            margin-bottom: 20px;
+        }
+        .control-group {
+            background: #f5f5f5;
+            padding: 12px;
+            border-radius: 8px;
+        }
+        .control-group h3 {
+            margin-top: 0;
+            margin-bottom: 8px;
+            font-size: 14px;
+            color: #666;
+        }
+        select {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            margin-bottom: 8px;
+        }
+        .chart-container {
+            height: 400px;
+            background: white;
+            border-radius: 8px;
+            padding: 16px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .stats {
+            display: flex;
+            gap: 16px;
+            margin-top: 16px;
+        }
+        .stat {
+            flex: 1;
+            padding: 12px;
+            background: #f5f5f5;
+            border-radius: 8px;
+            text-align: center;
+        }
+        .stat-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #2667FF;
+        }
+        .stat-label {
+            font-size: 14px;
+            color: #666;
+            margin-top: 4px;
+        }
+        .toggle-container {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .toggle-switch {
+            position: relative;
+            display: inline-block;
+            width: 48px;
+            height: 24px;
+        }
+        .toggle-switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        .toggle-slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #ccc;
+            transition: .4s;
+            border-radius: 24px;
+        }
+        .toggle-slider:before {
+            position: absolute;
+            content: "";
+            height: 16px;
+            width: 16px;
+            left: 4px;
+            bottom: 4px;
+            background-color: white;
+            transition: .4s;
+            border-radius: 50%;
+        }
+        input:checked + .toggle-slider {
+            background-color: #2667FF;
+        }
+        input:checked + .toggle-slider:before {
+            transform: translateX(24px);
+        }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/papaparse/papaparse.min.js"></script>
+</head>
+<body>
+    <div class="drop-zone" id="dropZone">
+        <p>Drag and drop your Peloton workout CSV file here<br>
+        <small>Download from: members.onepeloton.com/profile/workouts</small></p>
+    </div>
+
+    <div class="controls">
+        <div class="control-group">
+            <h3>Ride Duration</h3>
+            <select id="durationFilter">
+                <option value="all">All Durations</option>
+            </select>
+        </div>
+        <div class="control-group">
+            <h3>Time Range</h3>
+            <select id="timeRange">
+                <option value="all">All Time</option>
+                <option value="year">Last Year</option>
+                <option value="6months">Last 6 Months</option>
+                <option value="3months">Last 3 Months</option>
+                <option value="month">Last Month</option>
+            </select>
+        </div>
+        <div class="control-group">
+            <h3>Trend Line</h3>
+            <div class="toggle-container">
+                <label class="toggle-switch">
+                    <input type="checkbox" id="trendlineToggle">
+                    <span class="toggle-slider"></span>
+                </label>
+                <span>Show Trend Line</span>
+            </div>
+        </div>
+        <div class="control-group">
+            <h3>Outliers</h3>
+            <div class="toggle-container">
+                <label class="toggle-switch">
+                    <input type="checkbox" id="outlierToggle">
+                    <span class="toggle-slider"></span>
+                </label>
+                <span>Filter Outliers</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="chart-container">
+        <canvas id="outputChart"></canvas>
+    </div>
+
+    <div class="stats">
+        <div class="stat">
+            <div class="stat-value" id="avgOutput">-</div>
+            <div class="stat-label">Average Output</div>
+        </div>
+        <div class="stat">
+            <div class="stat-value" id="maxOutput">-</div>
+            <div class="stat-label">Max Output</div>
+        </div>
+        <div class="stat">
+            <div class="stat-value" id="totalRides">-</div>
+            <div class="stat-label">Total Rides</div>
+        </div>
+    </div>
+
+    <script>
+document.addEventListener('DOMContentLoaded', () => {
+    const dropZone = document.getElementById('dropZone');
+    const durationFilter = document.getElementById('durationFilter');
+    const timeRange = document.getElementById('timeRange');
+    const trendlineToggle = document.getElementById('trendlineToggle');
+    const outlierToggle = document.getElementById('outlierToggle');
+    let outputChart = null;
+    let workouts = [];
+
+    // Helper to load workouts from localStorage
+    function loadWorkoutsFromLocalStorage() {
+      const savedWorkouts = localStorage.getItem('workouts');
+      if (savedWorkouts) {
+          return JSON.parse(savedWorkouts);
+      }
+      return [];
+    }
+
+    // Helper to save workouts to localStorage
+    function saveWorkoutsToLocalStorage(workouts) {
+        localStorage.setItem('workouts', JSON.stringify(workouts));
+    }
+  
+    function handleDragOver(e) {
+        e.preventDefault();
+        dropZone.classList.add('drag-over');
+    }
+  
+    function handleDragLeave(e) {
+        e.preventDefault();
+        dropZone.classList.remove('drag-over');
+    }
+  
+    function handleDrop(e) {
+        e.preventDefault();
+        dropZone.classList.remove('drag-over');
+    
+        const file = e.dataTransfer.files[0];
+        if (file && file.name.endsWith('.csv')) {
+            parseCSV(file);
+        }
+    }
+  
+    function parseCSV(file) {
+        Papa.parse(file, {
+            complete: function(results) {
+                const newWorkouts = parseWorkouts(results.data);
+                const lastSavedDate = workouts.length > 0 ? workouts[workouts.length - 1].timestamp : 0;
+                const newWorkoutsToSave = newWorkouts.filter(w => w.timestamp > lastSavedDate);
+
+                if (newWorkoutsToSave.length > 0) {
+                    workouts = [...workouts, ...newWorkoutsToSave];
+                    saveWorkoutsToLocalStorage(workouts);
+                    updateDurationOptions();
+                    updateTimeRangeOptions();
+                    updateVisualization();
+                } else {
+                    alert('No new workouts found in the uploaded file.');
+                }
+            }
+        });
+    }
+  
+    function parseWorkouts(data) {
+        console.log("Starting to parse CSV data:", data);
+        
+        const workouts = [];
+        const headers = data[0];
+        
+        const dateIndex = headers.findIndex(col => col.includes('Workout Timestamp'));
+        const typeIndex = headers.findIndex(col => col.includes('Fitness Discipline'));
+        const durationIndex = headers.findIndex(col => col.includes('Length'));
+        const outputIndex = headers.findIndex(col => col.includes('Total Output'));
+        
+        for (let i = 1; i < data.length; i++) {
+            const row = data[i];
+            
+            if (row.length <= 1) continue;
+            
+            const workout = {
+                date: row[dateIndex]?.split(' ')[0],
+                timestamp: new Date(row[dateIndex]).getTime(),
+                type: row[typeIndex],
+                duration: parseInt(row[durationIndex]),
+                output: parseFloat(row[outputIndex])
+            };
+    
+            if (workout.type === 'Cycling' && !isNaN(workout.output) && workout.output > 0) {
+                workouts.push(workout);
+            }
+        }
+    
+        return workouts.sort((a, b) => a.timestamp - b.timestamp);
+    }
+  
+    function updateDurationOptions() {
+        const durations = [...new Set(workouts.map(w => w.duration))].sort((a, b) => a - b);
+        durationFilter.innerHTML = '<option value="all">All Durations</option>' +
+            durations.map(d => `<option value="${d}">${d} min</option>`).join('');
+    }
+
+    function updateTimeRangeOptions() {
+        // Get unique years from workout data
+        const years = [...new Set(workouts.map(w => new Date(w.timestamp).getFullYear()))]
+            .sort((a, b) => b - a);  // Sort years in descending order
+        
+        // Create the base options
+        const baseOptions = `
+            <option value="all">All Time</option>
+            <option value="year">Last Year</option>
+            <option value="6months">Last 6 Months</option>
+            <option value="3months">Last 3 Months</option>
+            <option value="month">Last Month</option>
+            <optgroup label="Calendar Years">
+        `;
+
+        // Add calendar year options
+        const yearOptions = years.map(year => 
+            `<option value="calendar${year}">Calendar ${year}</option>`
+        ).join('');
+
+        timeRange.innerHTML = baseOptions + yearOptions + '</optgroup>';
+    }
+
+    function calculatePolynomialRegression(xValues, yValues, degree) {
+        const n = xValues.length;
+        if (n < degree + 1) return null;
+
+        // Create matrices for the system of equations
+        const matrix = [];
+        const vector = [];
+        
+        // Fill the matrix and vector
+        for (let i = 0; i <= degree; i++) {
+            const row = [];
+            let sum = 0;
+            
+            for (let j = 0; j <= degree; j++) {
+                let value = 0;
+                for (let k = 0; k < n; k++) {
+                    value += Math.pow(xValues[k], i + j);
+                }
+                row.push(value);
+            }
+            
+            for (let k = 0; k < n; k++) {
+                sum += yValues[k] * Math.pow(xValues[k], i);
+            }
+            
+            matrix.push(row);
+            vector.push(sum);
+        }
+
+        // Solve the system using Gaussian elimination
+        for (let i = 0; i < degree + 1; i++) {
+            let maxEl = Math.abs(matrix[i][i]);
+            let maxRow = i;
+            
+            for (let k = i + 1; k < degree + 1; k++) {
+                if (Math.abs(matrix[k][i]) > maxEl) {
+                    maxEl = Math.abs(matrix[k][i]);
+                    maxRow = k;
+                }
+            }
+
+            for (let k = i; k < degree + 1; k++) {
+                const tmp = matrix[maxRow][k];
+                matrix[maxRow][k] = matrix[i][k];
+                matrix[i][k] = tmp;
+            }
+            
+            const tmp = vector[maxRow];
+            vector[maxRow] = vector[i];
+            vector[i] = tmp;
+
+            for (let k = i + 1; k < degree + 1; k++) {
+                const c = -matrix[k][i] / matrix[i][i];
+                for (let j = i; j < degree + 1; j++) {
+                    if (i === j) {
+                        matrix[k][j] = 0;
+                    } else {
+                        matrix[k][j] += c * matrix[i][j];
+                    }
+                }
+                vector[k] += c * vector[i];
+            }
+        }
+
+        // Back substitution
+        const coefficients = new Array(degree + 1).fill(0);
+        for (let i = degree; i >= 0; i--) {
+            let sum = 0;
+            for (let j = i + 1; j < degree + 1; j++) {
+                sum += matrix[i][j] * coefficients[j];
+            }
+            coefficients[i] = (vector[i] - sum) / matrix[i][i];
+        }
+
+        return coefficients;
+    }
+
+    function calculateTrendLine(data) {
+    if (data.length < 2) return null;
+    
+    // Simple linear regression
+    const n = data.length;
+    const xValues = Array.from({length: n}, (_, i) => i);
+    const yValues = data.map(d => d.output);
+    
+    // Calculate means
+    const xMean = xValues.reduce((a, b) => a + b) / n;
+    const yMean = yValues.reduce((a, b) => a + b) / n;
+    
+    // Calculate coefficients
+    let numerator = 0;
+    let denominator = 0;
+    for (let i = 0; i < n; i++) {
+        numerator += (xValues[i] - xMean) * (yValues[i] - yMean);
+        denominator += (xValues[i] - xMean) * (xValues[i] - xMean);
+    }
+    
+    const slope = numerator / denominator;
+    const intercept = yMean - (slope * xMean);
+    
+    // Calculate 5 evenly spaced points along the trend line
+    const trendPoints = [];
+    const numPoints = 5;
+    
+    for (let i = 0; i < numPoints; i++) {
+        const x = (i / (numPoints - 1)) * (n - 1);  // Evenly space points from 0 to n-1
+        const dataIndex = Math.floor((i / (numPoints - 1)) * (data.length - 1));
+        
+        trendPoints.push({
+            x: data[dataIndex].date,
+            y: slope * x + intercept
+        });
+    }
+    
+    return trendPoints;
+}
+
+    function filterOutliers(workouts) {
+        if (workouts.length < 4) return workouts; // Need enough data points
+        
+        // Group workouts by duration to compare similar length rides
+        const workoutsByDuration = {};
+        workouts.forEach(workout => {
+            if (!workoutsByDuration[workout.duration]) {
+                workoutsByDuration[workout.duration] = [];
+            }
+            workoutsByDuration[workout.duration].push(workout);
+        });
+
+        // Process each duration group separately
+        const filteredWorkouts = [];
+        Object.values(workoutsByDuration).forEach(durationGroup => {
+            if (durationGroup.length < 4) {
+                // If not enough data points in group, keep all workouts
+                filteredWorkouts.push(...durationGroup);
+                return;
+            }
+
+            // Calculate statistics for this duration group
+            const outputs = durationGroup.map(w => w.output);
+            const mean = outputs.reduce((a, b) => a + b) / outputs.length;
+            
+            // Calculate standard deviation
+            const squareDiffs = outputs.map(output => {
+                const diff = output - mean;
+                return diff * diff;
+            });
+            const avgSquareDiff = squareDiffs.reduce((a, b) => a + b) / squareDiffs.length;
+            const stdDev = Math.sqrt(avgSquareDiff);
+
+            // Define outlier threshold (3 standard deviations from mean)
+            const lowerThreshold = mean - (3 * stdDev);
+            const upperThreshold = mean + (3 * stdDev);
+
+            // Filter outliers
+            const validWorkouts = durationGroup.filter(workout => 
+                workout.output >= lowerThreshold && 
+                workout.output <= upperThreshold
+            );
+            
+            filteredWorkouts.push(...validWorkouts);
+        });
+
+        return filteredWorkouts;
+    }
+  
+    function filterWorkouts() {
+        let filtered = [...workouts];
+        
+        // Apply duration filter
+        if (durationFilter.value !== 'all') {
+            const duration = parseInt(durationFilter.value);
+            filtered = filtered.filter(w => w.duration === duration);
+        }
+
+        // Apply time range filter
+        const now = Date.now();
+        if (timeRange.value.startsWith('calendar')) {
+            const year = parseInt(timeRange.value.substring(8));
+            filtered = filtered.filter(w => {
+                const workoutYear = new Date(w.timestamp).getFullYear();
+                return workoutYear === year;
+            });
+        } else {
+            switch (timeRange.value) {
+                case 'year':
+                    filtered = filtered.filter(w => w.timestamp > now - 365 * 24 * 60 * 60 * 1000);
+                    break;
+                case '6months':
+                    filtered = filtered.filter(w => w.timestamp > now - 180 * 24 * 60 * 60 * 1000);
+                    break;
+                case '3months':
+                    filtered = filtered.filter(w => w.timestamp > now - 90 * 24 * 60 * 60 * 1000);
+                    break;
+                case 'month':
+                    filtered = filtered.filter(w => w.timestamp > now - 30 * 24 * 60 * 60 * 1000);
+                    break;
+            }
+        }
+
+        // Apply outlier filter if enabled
+        if (outlierToggle.checked) {
+            filtered = filterOutliers(filtered);
+        }
+
+        return filtered;
+    }
+  
+    function updateVisualization() {
+        const filtered = filterWorkouts();
+        
+        // Update stats
+        document.getElementById('avgOutput').textContent = 
+            Math.round(filtered.reduce((sum, w) => sum + w.output, 0) / filtered.length);
+        document.getElementById('maxOutput').textContent = 
+            Math.max(...filtered.map(w => w.output));
+        document.getElementById('totalRides').textContent = filtered.length;
+
+        // Calculate y-axis max dynamically
+        const maxOutput = Math.max(...filtered.map(w => w.output));
+        const yAxisMax = Math.ceil(maxOutput * 1.1 / 100) * 100;
+
+        // Calculate trend line if enabled
+        const trendlineData = trendlineToggle.checked ? calculateTrendLine(filtered) : null;
+
+        // Destroy existing chart
+        if (outputChart) outputChart.destroy();
+
+        // Create datasets array
+        const datasets = [{
+            label: 'Output',
+            data: filtered.map(w => w.output),
+            borderColor: '#2667FF',
+            backgroundColor: 'rgba(38, 103, 255, 0.1)',
+            tension: 0.1,
+            fill: true
+        }];
+
+        // Add trend line dataset if enabled
+        if (trendlineData) {
+            datasets.push({
+                label: 'Trend Line',
+                data: trendlineData,
+                borderColor: '#FF4B4B',
+                borderWidth: 2,
+                borderDash: [5, 5],
+                fill: false,
+                pointRadius: 0,
+                tension: 0.4
+            });
+        }
+
+        // Create output trend chart
+        outputChart = new Chart(document.getElementById('outputChart'), {
+            type: 'line',
+            data: {
+                labels: filtered.map(w => w.date),
+                datasets: datasets
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    title: {
+                        display: true,
+                        text: `Cycling Output Trend${durationFilter.value !== 'all' ? ` (${durationFilter.value} min rides)` : ''}`
+                    },
+                    tooltip: {
+                        callbacks: {
+                            label: function(context) {
+                                return `Output: ${context.raw}`;
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    y: {
+                        min: Math.floor(Math.min(...filtered.map(w => w.output)) * 0.9),
+                        max: yAxisMax,
+                        title: {
+                            display: true,
+                            text: 'Output'
+                        }
+                    },
+                    x: {
+                        title: {
+                            display: true,
+                            text: 'Date'
+                        }
+                    }
+                }
+            }
+        });
+    }
+  
+    // Set up event listeners
+    dropZone.addEventListener('dragover', handleDragOver);
+    dropZone.addEventListener('dragleave', handleDragLeave);
+    dropZone.addEventListener('drop', handleDrop);
+    durationFilter.addEventListener('change', updateVisualization);
+    timeRange.addEventListener('change', updateVisualization);
+    trendlineToggle.addEventListener('change', updateVisualization);
+    outlierToggle.addEventListener('change', updateVisualization);
+
+    // Load workouts from localStorage on page load
+    workouts = loadWorkoutsFromLocalStorage();
+    if (workouts.length > 0) {
+        updateDurationOptions();
+        updateTimeRangeOptions();
+        updateVisualization();
+    }
+  });
+    </script>
+</body>
+</html>
